@@ -1,0 +1,56 @@
+{
+  "name": "s3-one",
+  "version": "1.0.0",
+  "description": "S3 in one line of code: put/get text, JSON, files and streams, signed URLs, list, copy/move and namespaces - for AWS S3, Cloudflare R2, MinIO, Backblaze B2 and any S3-compatible storage, with full AWS SDK access.",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src/"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nivkman/s3-one.git"
+  },
+  "homepage": "https://github.com/nivkman/s3-one#readme",
+  "bugs": {
+    "url": "https://github.com/nivkman/s3-one/issues"
+  },
+  "keywords": [
+    "s3",
+    "aws",
+    "aws-s3",
+    "r2",
+    "cloudflare-r2",
+    "minio",
+    "backblaze",
+    "storage",
+    "upload",
+    "signed-url",
+    "presigned-url",
+    "lightweight"
+  ],
+  "author": "Niv Kaufman",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1156.0",
+    "@aws-sdk/lib-storage": "^3.1156.0",
+    "@aws-sdk/s3-request-presigner": "^3.1156.0",
+    "logger-standard": "^2.0.1"
+  }
+}
