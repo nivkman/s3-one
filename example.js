@@ -1,7 +1,7 @@
 // Run: S3_URL="s3://KEY:SECRET@my-bucket?endpoint=http://localhost:8333" node example.js
 import { connectS3 } from './src/index.js';
 
-const s3 = await connectS3(process.env.S3_URL, { prefix: 'example', createBucket: true });
+const s3 = await connectS3(process.env.S3_URL, { prefix: 'example', createBucket: true, logger: console });
 
 // Text, JSON and binary
 await s3.put('hello.txt', 'Hello from s3-one 👋');

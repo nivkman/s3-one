@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { connectS3, S3Client, sdk } from '../src/index.js';
+import { connectS3, S3Client, DeleteError, sdk } from '../src/index.js';
 import { startS3 } from './helpers.js';
 
 const BUCKET = `s3-one-test-${process.pid}`;
@@ -21,7 +21,7 @@ function testUrl(bucket = BUCKET) {
 
 before(async () => {
   server = await startS3();
-  s3 = await connectS3(testUrl(), { createBucket: true, logLevel: 'error' });
+  s3 = await connectS3(testUrl(), { createBucket: true });
   files = mkdtempSync(join(tmpdir(), 's3-one-files-'));
 });
 
@@ -40,12 +40,12 @@ test('connects with one URL and exposes the raw S3Client', async () => {
 });
 
 test('fails fast when the bucket does not exist', async () => {
-  await assert.rejects(connectS3(testUrl('no-such-bucket-s3-one'), { logLevel: 'error' }), /bucket not found/);
+  await assert.rejects(connectS3(testUrl('no-such-bucket-s3-one'), {}), /bucket not found/);
 });
 
 test('fails fast with wrong credentials', async () => {
   const bad = `s3://wrong:creds@${BUCKET}?endpoint=${encodeURIComponent(server.endpoint)}`;
-  await assert.rejects(connectS3(bad, { logLevel: 'error' }), /cannot access bucket/);
+  await assert.rejects(connectS3(bad, {}), /cannot access bucket/);
 });
 
 test('put/get text, Buffer and JSON', async () => {
@@ -185,16 +185,83 @@ test('signedUploadUrl rejects an upload with a different Content-Type', async ()
 });
 
 test('url() builds public URLs from publicUrl and refuses without it', async () => {
-  const cdn = await connectS3(testUrl(), { publicUrl: 'https://cdn.example.com/', prefix: 'site', logLevel: 'error' });
+  const cdn = await connectS3(testUrl(), { publicUrl: 'https://cdn.example.com/', prefix: 'site' });
   assert.equal(cdn.url('img/my cat.png'), 'https://cdn.example.com/site/img/my%20cat.png');
   assert.throws(() => s3.url('x'), /publicUrl/);
   cdn.disconnect();
 });
 
 test('prefix option namespaces the root', async () => {
-  const app = await connectS3(testUrl(), { prefix: 'app/', logLevel: 'error' });
+  const app = await connectS3(testUrl(), { prefix: 'app/' });
   await app.put('k.txt', 'v');
   assert.equal(await s3.getText('app/k.txt'), 'v');
   assert.equal(await app.clear(), 1);
   app.disconnect();
+});
+
+// ---- Review fixes ----------------------------------------------------------
+
+test('put accepts a Blob', async () => {
+  await s3.put('blob.txt', new Blob(['from a blob']));
+  assert.equal(await s3.getText('blob.txt'), 'from a blob');
+});
+
+test('del throws DeleteError when S3 refuses some keys', async () => {
+  const original = s3.client.send.bind(s3.client);
+  s3.client.send = async (command) => (command instanceof sdk.DeleteObjectsCommand
+    ? { Errors: [{ Key: 'locked.txt', Code: 'AccessDenied' }] }
+    : original(command));
+  try {
+    const error = await s3.del('a.txt', 'locked.txt').catch((e) => e);
+    assert.ok(error instanceof DeleteError, String(error));
+    assert.deepEqual(error.errors, [{ Key: 'locked.txt', Code: 'AccessDenied' }]);
+    assert.match(error.message, /locked\.txt \(AccessDenied\)/);
+  } finally {
+    s3.client.send = original;
+  }
+});
+
+test('a bucket deleted after connect throws instead of looking empty', async () => {
+  const name = `s3-one-gone-${process.pid}`;
+  const gone = await connectS3(testUrl(name), { createBucket: true });
+  await gone.client.send(new sdk.DeleteBucketCommand({ Bucket: name }));
+  await assert.rejects(gone.get('anything'), /NoSuchBucket|does not exist/);
+  gone.disconnect();
+});
+
+test('a path in the URL becomes the key prefix', async () => {
+  const url = testUrl().replace(`@${BUCKET}?`, `@${BUCKET}/tenants/acme?`);
+  const tenant = await connectS3(url, {});
+  assert.equal(tenant.prefix, 'tenants/acme/');
+  await tenant.put('k.txt', 'v');
+  assert.equal(await s3.getText('tenants/acme/k.txt'), 'v');
+  await tenant.clear();
+  tenant.disconnect();
+});
+
+test('an unreachable endpoint reports the network error code', async () => {
+  const dead = `s3://k:s@${BUCKET}?endpoint=${encodeURIComponent('http://127.0.0.1:1')}`;
+  await assert.rejects(connectS3(dead, {}), /ECONNREFUSED/);
+});
+
+test('namespace names are validated and trimmed', () => {
+  assert.throws(() => s3.namespace(''), /non-empty/);
+  assert.throws(() => s3.namespace('///'), /non-empty/);
+  assert.equal(s3.namespace('/photos/').prefix, 'photos/');
+});
+
+test('signed URL ttl must be between 1 second and 7 days', async () => {
+  await assert.rejects(s3.signedUrl('x', { ttl: 0 }), RangeError);
+  await assert.rejects(s3.signedUploadUrl('x', { ttl: 8 * 24 * 3600 }), RangeError);
+  assert.match(await s3.signedUrl('x', { ttl: 7 * 24 * 3600 }), /X-Amz-Expires=604800/);
+});
+
+test('importing s3-one does not touch the global console, and logging is opt-in', async () => {
+  const before = { info: console.info, warn: console.warn, error: console.error };
+  await import('../src/index.js');
+  assert.deepEqual({ info: console.info, warn: console.warn, error: console.error }, before);
+  const lines = [];
+  const logged = await connectS3(testUrl(), { logger: { info: (m) => lines.push(m) } });
+  logged.disconnect();
+  assert.deepEqual(lines, [`[s3-one] Connected to S3 bucket ${BUCKET}`, '[s3-one] S3 client closed']);
 });

@@ -78,20 +78,20 @@ Resolves once the bucket answers. A wrong bucket name or bad credentials fail he
 |--------|---------|
 | URL | `s3://KEY:SECRET@bucket?region=eu-west-1&endpoint=https://…` |
 | URL, credentials from the AWS chain | `s3://bucket` (env vars, `~/.aws`, IAM role) |
+| URL with a path | `s3://KEY:SECRET@bucket/tenants/acme` → every key goes under `tenants/acme/` |
 | Object | `{ bucket, region, endpoint, accessKeyId, secretAccessKey, ...anyS3ClientOption }` |
 | Nothing | `S3_URL`, or `S3_BUCKET` + `S3_ENDPOINT` + the standard AWS env vars |
 
-> URL-encode the secret if it contains `/` or `+`: `encodeURIComponent(secret)`.
+> URL-encode credentials that contain `/`, `%`, `@` or `:` with `encodeURIComponent(secret)`. A malformed `%` gets a clear error.
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `prefix` | `''` | Prefix every key with `prefix/` |
 | `createBucket` | `false` | Create the bucket if it doesn't exist (handy for MinIO and local dev) |
 | `publicUrl` | — | Base URL for `url()`, e.g. your CDN or `https://pub-xxx.r2.dev` |
-| `service` | `'s3-one'` | Logger service name |
-| `logLevel` | `'info'` | `'debug'`, `'info'`, `'warn'`, `'error'` |
+| `logger` | silent | Any object with `debug`/`info`/`warn`/`error`, e.g. `console`, pino or [`logger-standard`](https://www.npmjs.com/package/logger-standard) |
 
-Path-style addressing is turned on automatically when you pass an `endpoint`.
+Path-style addressing is turned on automatically when you pass an `endpoint`. The region comes from the URL, `AWS_REGION` or `AWS_DEFAULT_REGION` (else `us-east-1`). On AWS, a bucket in a different region is still reached, because region redirects are followed.
 
 ### Providers
 
@@ -131,8 +131,8 @@ connectS3('s3://KEY:SECRET@my-space?region=nyc3&endpoint=https://nyc3.digitaloce
 | `get(key)` | `Buffer` \| `null` |
 | `getText(key)` | `string` \| `null` |
 | `getJSON(key)` | parsed value \| `null` |
-| `getStream(key)` | `Readable` \| `null` — for big objects or piping into an HTTP response |
-| `getFile(key, filePath)` | `true` \| `false` (missing). Creates parent folders |
+| `getStream(key)` | `Readable` \| `null` — for big objects or piping into an HTTP response. Consume or `destroy()` it, or the connection stays open |
+| `getFile(key, filePath)` | `true` \| `false` (missing). Creates parent folders; a failed download never leaves a half-written file |
 | `stat(key)` | `{ key, size, contentType, lastModified, etag, metadata }` \| `null` |
 | `has(key)` | `boolean` |
 
@@ -142,15 +142,15 @@ connectS3('s3://KEY:SECRET@my-space?region=nyc3&endpoint=https://nyc3.digitaloce
 |--------|-------------|
 | `list(prefix?, { pageSize? })` | Async iterator of `{ key, size, lastModified, etag }` over every page |
 | `keys(prefix?)` | All keys as an array |
-| `del(...keys)` | Deletes keys (strings or arrays), batched 1,000 per request. Missing keys are fine |
-| `copy(from, to)` | Server-side copy |
+| `del(...keys)` | Deletes keys (strings or arrays), batched 1,000 per request. Missing keys are fine. Throws `DeleteError` (with `.errors` per key) if S3 refuses any, e.g. an IAM policy |
+| `copy(from, to)` | Server-side copy. Throws `NoSuchKey` if `from` doesn't exist |
 | `move(from, to)` | Copy, then delete |
 | `clear()` | Deletes everything in a namespace. Refuses on the root so you can't empty the bucket by accident |
 
 ### Links
 
 ```js
-// Temporary download link (default ttl: 900 seconds)
+// Temporary download link (ttl: 1 second to 7 days, default 900)
 await s3.signedUrl('reports/q3.pdf', { ttl: 600 });
 await s3.signedUrl('reports/q3.pdf', { download: true });           // browser saves it as q3.pdf
 await s3.signedUrl('reports/q3.pdf', { download: 'Q3 Report.pdf' }); // custom file name

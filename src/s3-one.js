@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rename, rm } from 'node:fs/promises';
 import { dirname, basename } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -12,9 +12,20 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { contentTypeFor } from './content-type.js';
 
 const DELETE_BATCH = 1000;
+const MAX_SIGNED_TTL = 7 * 24 * 3600;
 
-export function isNotFound(error) {
-  return ['NoSuchKey', 'NotFound', 'NoSuchBucket'].includes(error?.name) || error?.$metadata?.httpStatusCode === 404;
+// Object-level "missing". NoSuchBucket is deliberately not here: a deleted bucket must not look like "no data".
+// (HEAD responses have no body, so HeadObject on a missing bucket still reads as NotFound.)
+export function isMissingObject(error) {
+  return error?.name === 'NoSuchKey' || error?.name === 'NotFound';
+}
+
+export class DeleteError extends Error {
+  constructor(errors) {
+    super(`s3-one: could not delete ${errors.length} object(s): ${errors.slice(0, 3).map((e) => `${e.Key} (${e.Code})`).join(', ')}`);
+    this.name = 'DeleteError';
+    this.errors = errors;
+  }
 }
 
 function isStream(body) {
@@ -35,6 +46,15 @@ function toObjectInfo(key, head) {
     etag: head.ETag,
     metadata: head.Metadata ?? {},
   };
+}
+
+async function toUploadable(body) {
+  return body instanceof Blob ? Buffer.from(await body.arrayBuffer()) : body;
+}
+
+function checkTtl(ttl) {
+  if (!(ttl >= 1 && ttl <= MAX_SIGNED_TTL)) throw new RangeError(`s3-one: ttl must be between 1 and ${MAX_SIGNED_TTL} seconds (7 days)`);
+  return Math.round(ttl);
 }
 
 function contentDisposition(download, key) {
@@ -72,15 +92,17 @@ export class S3One {
   }
 
   namespace(name) {
-    return new S3One(this.#core, `${this.#prefix}${name.replace(/\/+$/, '')}/`);
+    const clean = String(name).replace(/^\/+|\/+$/g, '');
+    if (!clean) throw new Error('s3-one: namespace() needs a non-empty name');
+    return new S3One(this.#core, `${this.#prefix}${clean}/`);
   }
 
   // ---- Write -------------------------------------------------------------
 
   async put(key, body, options = {}) {
     checkBody(body);
-    const params = this.#putParams(key, body, options);
-    const result = isStream(body)
+    const params = this.#putParams(key, await toUploadable(body), options);
+    const result = isStream(params.Body)
       ? await new Upload({ client: this.client, params }).done()
       : await this.client.send(new PutObjectCommand(params));
     this.#core.logger.debug(`PUT ${params.Key}`);
@@ -116,11 +138,19 @@ export class S3One {
     return this.#getBody(key);
   }
 
+  // Downloads to a temp file first, so a failed download never leaves a half-written file behind.
   async getFile(key, filePath) {
     const body = await this.#getBody(key);
     if (!body) return false;
     await mkdir(dirname(filePath), { recursive: true });
-    await pipeline(body, createWriteStream(filePath));
+    const partial = `${filePath}.${process.pid}.partial`;
+    try {
+      await pipeline(body, createWriteStream(partial));
+      await rename(partial, filePath);
+    } catch (error) {
+      await rm(partial, { force: true });
+      throw error;
+    }
     return true;
   }
 
@@ -128,7 +158,7 @@ export class S3One {
     try {
       return toObjectInfo(key, await this.client.send(new HeadObjectCommand(this.#params(key))));
     } catch (error) {
-      if (isNotFound(error)) return null;
+      if (isMissingObject(error)) return null;
       throw error;
     }
   }
@@ -155,18 +185,23 @@ export class S3One {
     return keys;
   }
 
+  // Throws DeleteError (with .errors per key) when S3 refuses some keys, e.g. an IAM policy denies them.
   async del(...keys) {
-    for (const batch of chunk(keys.flat(), DELETE_BATCH)) {
-      const Objects = batch.map((key) => ({ Key: this.#key(key) }));
-      await this.client.send(new DeleteObjectsCommand({ Bucket: this.bucket, Delete: { Objects, Quiet: true } }));
-    }
-    return keys.flat().length;
+    const all = keys.flat();
+    for (const batch of chunk(all, DELETE_BATCH)) await this.#deleteBatch(batch);
+    return all.length;
   }
 
-  // Deletes every object in this namespace. Refuses on the root to avoid emptying the bucket.
+  // Deletes every object in this namespace, page by page. Refuses on the root to avoid emptying the bucket.
   async clear() {
     if (!this.#prefix) throw new Error('s3-one: clear() only works on a namespace');
-    return this.del(await this.keys());
+    let deleted = 0;
+    let batch = [];
+    for await (const { key } of this.list()) {
+      batch.push(key);
+      if (batch.length === DELETE_BATCH) deleted += await this.del(batch.splice(0));
+    }
+    return deleted + (await this.del(batch));
   }
 
   async copy(from, to) {
@@ -186,14 +221,14 @@ export class S3One {
   async signedUrl(key, { ttl = 900, download } = {}) {
     const ResponseContentDisposition = contentDisposition(download, key);
     const command = new GetObjectCommand({ ...this.#params(key), ResponseContentDisposition });
-    return getSignedUrl(this.client, command, { expiresIn: Math.round(ttl) });
+    return getSignedUrl(this.client, command, { expiresIn: checkTtl(ttl) });
   }
 
   // The uploader must send the same Content-Type header - it is part of the signature.
   async signedUploadUrl(key, { ttl = 900, contentType = contentTypeFor(key) } = {}) {
     const command = new PutObjectCommand({ ...this.#params(key), ContentType: contentType });
     const signableHeaders = new Set(['content-type']);
-    return getSignedUrl(this.#uploadSigner(), command, { expiresIn: Math.round(ttl), signableHeaders });
+    return getSignedUrl(this.#uploadSigner(), command, { expiresIn: checkTtl(ttl), signableHeaders });
   }
 
   url(key) {
@@ -248,8 +283,14 @@ export class S3One {
     try {
       return (await this.client.send(new GetObjectCommand(this.#params(key)))).Body;
     } catch (error) {
-      if (isNotFound(error)) return null;
+      if (isMissingObject(error)) return null;
       throw error;
     }
+  }
+
+  async #deleteBatch(keys) {
+    const Objects = keys.map((key) => ({ Key: this.#key(key) }));
+    const result = await this.client.send(new DeleteObjectsCommand({ Bucket: this.bucket, Delete: { Objects, Quiet: true } }));
+    if (result.Errors?.length) throw new DeleteError(result.Errors);
   }
 }

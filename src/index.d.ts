@@ -9,6 +9,11 @@ export type Seconds = number;
 
 export type Body = string | Uint8Array | Buffer | Blob | Readable | ReadableStream;
 
+/** Thrown by del(), clear() and move() when S3 refuses to delete some keys. */
+export class DeleteError extends Error {
+  errors: { Key?: string; Code?: string; Message?: string }[];
+}
+
 export interface S3Config extends Partial<S3ClientConfig> {
   bucket: string;
   region?: string;
@@ -20,15 +25,14 @@ export interface S3Config extends Partial<S3ClientConfig> {
 }
 
 export interface ConnectOptions {
-  /** Prefix every key with `${prefix}/`. */
+  /** Prefix every key with `${prefix}/` (added after a path in the s3:// URL). */
   prefix?: string;
   /** Create the bucket when it doesn't exist (handy for MinIO and local dev). */
   createBucket?: boolean;
   /** Base URL for url(), e.g. your CDN or https://pub-xxx.r2.dev */
   publicUrl?: string;
-  /** Logger service name (default: 's3-one'). */
-  service?: string;
-  logLevel?: 'debug' | 'info' | 'warn' | 'error';
+  /** Silent by default. Pass console, pino, logger-standard... any object with debug/info/warn/error. */
+  logger?: Partial<Record<'debug' | 'info' | 'warn' | 'error', (message: string) => void>>;
 }
 
 export interface PutOptions {
@@ -82,7 +86,7 @@ export class S3One {
   copy(from: string, to: string): Promise<{ key: string }>;
   move(from: string, to: string): Promise<{ key: string }>;
 
-  /** Temporary download link. `download` makes browsers save it (true = the key's file name). */
+  /** Temporary download link. ttl: 1 second to 7 days (default 900). `download` makes browsers save it (true = the key's file name). */
   signedUrl(key: string, options?: { ttl?: Seconds; download?: boolean | string }): Promise<string>;
   /** Temporary upload link for a browser PUT. The uploader must send the same Content-Type. */
   signedUploadUrl(key: string, options?: { ttl?: Seconds; contentType?: string }): Promise<string>;
