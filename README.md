@@ -1,5 +1,7 @@
 # s3-one ☁️
 
+[![npm version](https://img.shields.io/npm/v/s3-one)](https://www.npmjs.com/package/s3-one)
+
 S3 in one line of code. Put and get text, JSON, files and streams, create signed URLs, list, copy, move and namespace — on AWS S3, Cloudflare R2, MinIO, Backblaze B2, DigitalOcean Spaces, SeaweedFS or any S3-compatible storage. The full AWS SDK is still there when you need it.
 
 ```js
