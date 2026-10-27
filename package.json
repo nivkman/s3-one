@@ -1,6 +1,6 @@
 {
   "name": "s3-one",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "S3 in one line of code: put/get text, JSON, files and streams, signed URLs, list, copy/move and namespaces - for AWS S3, Cloudflare R2, MinIO, Backblaze B2 and any S3-compatible storage, with full AWS SDK access.",
   "main": "src/index.js",
   "types": "src/index.d.ts",
